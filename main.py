@@ -7,6 +7,7 @@ Usage:
     python main.py --scenario cpu_stress
     python main.py --scenario memory_stress
     python main.py --all
+    python main.py --all --no-llm     (rule-based only, no API key needed)
     python main.py            (interactive menu)
 """
 from __future__ import annotations
@@ -24,10 +25,11 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 from rich import box
+from rich.markup import escape
 
 from tools.process_metrics import get_process_metrics
 from pipeline import run_pipeline
-from agents.llm_factory import is_quota_exhausted
+from agents.llm_factory import disable_llm, llm_mode_label, llm_snapshot
 
 # ── Suppress noisy library warnings in CLI output ────────────────────────────
 logging.basicConfig(level=logging.ERROR)
@@ -38,7 +40,9 @@ for noisy in ("agents.monitoring_agent", "agents.bottleneck_agent",
 
 console = Console()
 PROJECT_ROOT = Path(__file__).parent
-SERVICES     = ["backend", "frontend", "worker"]
+# Starting replica count per service (worker > 2 so scale-down is reachable)
+SERVICE_REPLICAS = {"backend": 2, "frontend": 2, "worker": 3}
+SERVICES     = list(SERVICE_REPLICAS)
 WARMUP_SECS  = 3.5
 SAMPLE_SECS  = 2.0
 
@@ -69,32 +73,47 @@ def _bar(value: float) -> str:
 
 # ── Process lifecycle ────────────────────────────────────────────────────────
 
-def spawn_services(scenario: str) -> dict[str, subprocess.Popen]:
-    procs: dict[str, subprocess.Popen] = {}
+def spawn_services(scenario: str, procs: dict[str, subprocess.Popen]) -> None:
+    """Start every service, registering each in `procs` as soon as it exists
+    so the caller can always clean up, even if a later spawn fails."""
     for svc in SERVICES:
-        p = subprocess.Popen(
+        procs[svc] = subprocess.Popen(
             [sys.executable, str(PROJECT_ROOT / "services.py"),
              "--service", svc, "--mode", scenario],
+            cwd=str(PROJECT_ROOT),
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
-        procs[svc] = p
-    return procs
 
 def collect_all_metrics(procs: dict[str, subprocess.Popen]) -> dict[str, dict]:
     metrics: dict[str, dict] = {}
     for svc, proc in procs.items():
+        if proc.poll() is not None:
+            console.print(f"[red]{svc} exited early (code {proc.returncode}); "
+                          f"skipping.[/red]")
+            continue
         try:
             m = get_process_metrics(pid=proc.pid, service_name=svc,
-                                    replicas=2, warm_up_secs=SAMPLE_SECS)
+                                    replicas=SERVICE_REPLICAS[svc],
+                                    warm_up_secs=SAMPLE_SECS)
             metrics[svc] = m
         except Exception as e:
             console.print(f"[red]Failed to measure {svc}: {e}[/red]")
     return metrics
 
 def kill_services(procs: dict[str, subprocess.Popen]) -> None:
+    """Terminate every service and reap it (no zombies, no orphans)."""
     for p in procs.values():
         try: p.terminate()
+        except Exception: pass
+    for p in procs.values():
+        try:
+            p.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            try:
+                p.kill()
+                p.wait(timeout=3)
+            except Exception: pass
         except Exception: pass
 
 # ── Display ──────────────────────────────────────────────────────────────────
@@ -196,12 +215,15 @@ def run_scenario(scenario: str) -> None:
         border_style="white", padding=(1, 2),
     ))
 
-    procs = spawn_services(scenario)
-    console.print(f"[dim]⏳ Warming up for {WARMUP_SECS}s…[/dim]")
-    time.sleep(WARMUP_SECS)
-
-    all_metrics = collect_all_metrics(procs)
-    kill_services(procs)
+    procs: dict[str, subprocess.Popen] = {}
+    try:
+        spawn_services(scenario, procs)
+        console.print(f"[dim]⏳ Warming up for {WARMUP_SECS}s…[/dim]")
+        time.sleep(WARMUP_SECS)
+        all_metrics = collect_all_metrics(procs)
+    finally:
+        # Always reap the load generators, even on Ctrl-C or a crash
+        kill_services(procs)
 
     if not all_metrics:
         console.print("[red]No metrics collected. Aborting.[/red]")
@@ -209,9 +231,9 @@ def run_scenario(scenario: str) -> None:
 
     print_metrics_table(all_metrics)
 
-    # Detect LLM mode once before looping
     for svc, metrics in all_metrics.items():
         console.print(f"\n[dim]🧠 Running 4-agent LangGraph pipeline for [bold]{svc}[/bold]…[/dim]")
+        before = llm_snapshot()
         try:
             state = run_pipeline(svc, metrics)
         except Exception as e:
@@ -222,11 +244,8 @@ def run_scenario(scenario: str) -> None:
             console.print(f"[red]Pipeline error for {svc}: {state['error']}[/red]")
             continue
 
-        if is_quota_exhausted():
-            llm_mode = "[dim italic](rule-based — Gemini quota reset at midnight)[/dim italic]"
-        else:
-            llm_mode = "[dim italic](Gemini)[/dim italic]"
-
+        # Report what actually produced this output, not what we hoped for
+        llm_mode = f"[dim italic]({escape(llm_mode_label(before))})[/dim italic]"
         print_agent_report(svc, state, llm_mode)
 
     console.print()
@@ -263,12 +282,15 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Multi-Agent Container Resource Advisor")
     parser.add_argument("--scenario", choices=["normal", "cpu_stress", "memory_stress"])
     parser.add_argument("--all", action="store_true", help="Run all 3 scenarios")
+    parser.add_argument("--no-llm", action="store_true",
+                        help="Skip Gemini and run the rule-based agents only")
     args = parser.parse_args()
 
-    if not os.getenv("GEMINI_API_KEY"):
-        console.print("[bold red]⚠  GEMINI_API_KEY not set.[/bold red]")
-        console.print("[dim]  export GEMINI_API_KEY=your_key_here[/dim]")
-        sys.exit(1)
+    if args.no_llm:
+        disable_llm()
+    elif not os.getenv("GEMINI_API_KEY"):
+        console.print("[yellow]GEMINI_API_KEY not set (.env or environment) — "
+                      "running rule-based agents only.[/yellow]")
 
     if args.all:
         for sc in ["normal", "cpu_stress", "memory_stress"]:

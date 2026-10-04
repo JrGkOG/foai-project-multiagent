@@ -2,7 +2,7 @@
 from __future__ import annotations
 import json, re, logging
 from agents.state import AgentState, ScalingDecision, MetricsData, BottleneckData
-from agents.llm_factory import call_gemini, QuotaExhausted
+from agents.llm_factory import call_gemini, LLMUnavailable
 
 logger = logging.getLogger(__name__)
 MIN_R, MAX_R = 1, 10
@@ -58,7 +58,7 @@ Replicas MUST be {MIN_R}–{MAX_R}. Reply ONLY with valid JSON (no markdown):
 
     try:
         result = _parse(call_gemini(prompt), m, b)
-    except QuotaExhausted:
+    except LLMUnavailable:
         result = _deterministic(m, b)
     except Exception as e:
         logger.debug("ScalingAgent LLM error: %s", e)

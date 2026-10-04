@@ -4,6 +4,8 @@ LangGraph Pipeline
 Wires the four agents into a sequential graph:
 
   START → monitoring_node → bottleneck_node → scaling_node → recommendation_node → END
+
+Any node that sets state["error"] short-circuits the graph straight to END.
 """
 from __future__ import annotations
 from langgraph.graph import StateGraph, START, END
@@ -12,6 +14,13 @@ from agents.monitoring_agent     import monitoring_agent_node
 from agents.bottleneck_agent     import bottleneck_agent_node
 from agents.scaling_agent        import scaling_agent_node
 from agents.recommendation_agent import recommendation_agent_node
+
+
+def _next_or_end(next_node: str):
+    """Router: continue to `next_node`, or stop if the previous node errored."""
+    def router(state: AgentState) -> str:
+        return END if state.get("error") else next_node
+    return router
 
 
 def build_graph() -> StateGraph:
@@ -23,10 +32,13 @@ def build_graph() -> StateGraph:
     g.add_node("scaling_node",        scaling_agent_node)
     g.add_node("recommendation_node", recommendation_agent_node)
 
-    g.add_edge(START,                "monitoring_node")
-    g.add_edge("monitoring_node",    "bottleneck_node")
-    g.add_edge("bottleneck_node",    "scaling_node")
-    g.add_edge("scaling_node",       "recommendation_node")
+    g.add_edge(START, "monitoring_node")
+    g.add_conditional_edges("monitoring_node", _next_or_end("bottleneck_node"),
+                            ["bottleneck_node", END])
+    g.add_conditional_edges("bottleneck_node", _next_or_end("scaling_node"),
+                            ["scaling_node", END])
+    g.add_conditional_edges("scaling_node", _next_or_end("recommendation_node"),
+                            ["recommendation_node", END])
     g.add_edge("recommendation_node", END)
 
     return g.compile()
