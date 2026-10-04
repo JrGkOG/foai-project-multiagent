@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from agents.state import (AgentState, FinalRecommendation,
                           MetricsData, BottleneckData, ScalingDecision)
-from agents.llm_factory import call_gemini, QuotaExhausted
+from agents.llm_factory import call_gemini, LLMUnavailable
 
 logger = logging.getLogger(__name__)
 
@@ -83,7 +83,7 @@ Write exactly 3 clear sentences: (1) what the problem is, (2) why scaling helps,
     try:
         narrative = call_gemini(prompt)
         logger.info("[RecommendationAgent] LLM narrative generated")
-    except QuotaExhausted:
+    except LLMUnavailable:
         narrative = _rule_narrative(m, b, sd)
         logger.info("[RecommendationAgent] Using rule-based narrative")
     except Exception as e:

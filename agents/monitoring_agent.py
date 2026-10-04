@@ -2,7 +2,7 @@
 from __future__ import annotations
 import logging
 from agents.state import AgentState, MetricsData
-from agents.llm_factory import call_gemini, QuotaExhausted
+from agents.llm_factory import call_gemini, LLMUnavailable
 
 logger = logging.getLogger(__name__)
 
@@ -25,7 +25,7 @@ In 2 sentences describe the current health. Be factual and concise."""
     try:
         summary = call_gemini(prompt)
         logger.info("[MonitoringAgent] LLM summary: %s", summary)
-    except QuotaExhausted:
+    except LLMUnavailable:
         summary = None   # will use rule-based display
     except Exception as e:
         summary = None
