@@ -2,7 +2,7 @@
 from __future__ import annotations
 import json, re, logging
 from agents.state import AgentState, BottleneckData, MetricsData
-from agents.llm_factory import call_gemini, QuotaExhausted
+from agents.llm_factory import call_gemini, LLMUnavailable
 
 logger = logging.getLogger(__name__)
 
@@ -70,7 +70,7 @@ Reply ONLY with valid JSON (no markdown):
 
     try:
         result = _parse(call_gemini(prompt), m)
-    except QuotaExhausted:
+    except LLMUnavailable:
         result = _deterministic(m)
     except Exception as e:
         logger.debug("BottleneckAgent LLM error: %s", e)

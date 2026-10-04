@@ -12,6 +12,10 @@ import psutil
 
 logger = logging.getLogger(__name__)
 
+# Simulated per-container memory limit. Memory % is measured against this
+# (like a Kubernetes memory limit), not against the host's total RAM.
+SERVICE_MEMORY_LIMIT_MB = 512
+
 
 def get_process_metrics(
     pid: int,
@@ -28,8 +32,8 @@ def get_process_metrics(
     cpu_pct = min(proc.cpu_percent(interval=None), 100.0)
 
     mem_info = proc.memory_info()
-    mem_pct  = proc.memory_percent()
     mem_mb   = mem_info.rss / (1024 ** 2)
+    mem_pct  = min(mem_mb / SERVICE_MEMORY_LIMIT_MB * 100.0, 100.0)
 
     # Realistic derived metrics
     # CPU stress → high req rate + high latency
